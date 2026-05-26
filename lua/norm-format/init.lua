@@ -68,6 +68,7 @@ local function split_initializations()
                         start_col = start_col,
                         end_row = end_row,
                         end_col = end_col,
+                        -- Use Tabs between type and name
                         new_text = { type_text .. "\t" .. name_text .. ";", "", indent .. name_text .. " = " .. value_text .. ";" }
                     })
                 end
@@ -89,7 +90,7 @@ function M.format()
     -- 1. Clang format (Alignment pass)
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
-        -- Note: We format the whole file, but we'll restore the header lines next
+        -- Use style that doesn't break return types
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
         vim.cmd(cmd)
         vim.fn.winrestview(view)
