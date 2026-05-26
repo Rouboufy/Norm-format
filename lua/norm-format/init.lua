@@ -95,26 +95,23 @@ local function split_initializations()
 end
 
 function M.format()
-    local buf_name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
-    vim.notify("Norm-format: Triggered on " .. buf_name, vim.log.levels.INFO)
-
-    -- 1. Semantic split
+    -- Use print for absolute visibility in :messages
+    print("NF_DEBUG: Format start")
+    
     local split_err, count = split_initializations()
     if split_err then
-        vim.notify("Norm-format split error: " .. split_err, vim.log.levels.ERROR)
+        print("NF_DEBUG: Split error: " .. split_err)
     elseif count and count > 0 then
-        vim.notify("Norm-format: Split " .. count .. " declarations", vim.log.levels.INFO)
+        print("NF_DEBUG: Split count: " .. count)
     end
 
-    -- 2. Clang format
-    local clang_cmd = "clang-format"
-    if vim.fn.executable(clang_cmd) == 1 then
+    if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         vim.cmd("silent! %!clang-format")
         vim.fn.winrestview(view)
-        vim.notify("Norm-format: Ran clang-format", vim.log.levels.INFO)
+        print("NF_DEBUG: Clang-format done")
     else
-        vim.notify("Norm-format: clang-format NOT FOUND in path", vim.log.levels.ERROR)
+        print("NF_DEBUG: Clang-format missing")
     end
 end
 
