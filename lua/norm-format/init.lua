@@ -12,7 +12,6 @@ function M.setup(opts)
     })
 end
 
--- Helper to check if a line is within the 42 Header (lines 1-12)
 local function is_in_header(line_idx)
     return line_idx < 12
 end
@@ -43,8 +42,6 @@ local function split_initializations()
         end
         if decl_node and type_node and name_node and value_node then
             local start_row, _, _, _ = decl_node:range()
-            
-            -- SKIP IF IN HEADER
             if not is_in_header(start_row) then
                 local parent = decl_node:parent()
                 local is_inside_func = false
@@ -63,8 +60,6 @@ local function split_initializations()
                     local _, start_col, end_row, end_col = decl_node:range()
                     local line_content = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
                     local indent = line_content:match("^%s*") or ""
-                    
-                    -- Use TAB for splitting type and name
                     table.insert(changes, {
                         start_row = start_row,
                         start_col = start_col,
@@ -84,11 +79,8 @@ end
 
 function M.format()
     local bufnr = vim.api.nvim_get_current_buf()
-    
-    -- Save exact header state
     local header_lines = vim.api.nvim_buf_get_lines(bufnr, 0, 12, false)
 
-    -- 1. Clang format (Alignment pass)
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
@@ -96,29 +88,21 @@ function M.format()
         vim.fn.winrestview(view)
     end
 
-    -- 2. Semantic split
     split_initializations()
 
-    -- 3. Final Norm logic pass
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local result = {}
     local in_function = false
     
     for i, line in ipairs(lines) do
         local line_idx = i - 1
-        
-        -- IF IN HEADER: Force restore original
         if is_in_header(line_idx) then
             table.insert(result, header_lines[i] or line)
         else
-            line = line:gsub("%s+$", "") -- Trim trailing
-            
-            -- Fix NO_ARGS_VOID
+            line = line:gsub("%s+$", "")
             if line:match("%s[%a_][%a%d_]*%(%)") or line:match("^[%a_][%a%d_]*%(%)") then
                  line = line:gsub("%(%)", "(void)")
             end
-
-            -- Fix RETURN_PARENTHESIS
             if line:match("^%s*return%s+[^%(].*;$") then
                 local indent, val = line:match("^(%s*)return%s+(.-);$")
                 if val and val ~= "" and not val:match("^%b()$") then
@@ -126,40 +110,34 @@ function M.format()
                 end
             end
 
-            -- Fix TABS between Type and Name (Advanced replacement)
-            -- Handles lines like "int    var;" or "void  func()"
-            if line:match("^[%t%s]*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*[%s;%(]") then
-                 -- Greedily capture indent, then type (non-space sequence), then the spaces, then the name/rest
-                 local indent, type, rest = line:match("^([%t%s]*)([%a_][%a%d_%*]*.-)%s+([%a_][%a%d_]*.*)")
-                 if indent and type and rest then
-                     line = indent .. type .. "\t" .. rest
-                 end
+            -- REFINED VARIABLE TABBING: Catch type followed by name
+            if not line:match("^#") and not line:match("^{") and not line:match("^}") then
+                if line:match("^[%t%s]*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*") then
+                    local indent, type, name_rest = line:match("^([%t%s]*)([%a_][%a%d_%*]*.-)%s+([%a_][%a%d_]*.*)")
+                    if indent and type and name_rest then
+                        line = indent .. type .. "\t" .. name_rest
+                    end
+                end
             end
             
-            -- Indentation: Force Tabs (convert any 4-space groups outside strings)
             line = line:gsub("    ", "\t")
-            
             if line:match("^{") then in_function = true end
             if line:match("^}") then in_function = false end
             
             local is_empty = line == ""
             local skip = false
-            
             if in_function and is_empty then
                 local prev = i > 1 and lines[i-1] or ""
                 local next = i < #lines and lines[i+1] or ""
                 local prev_is_decl = prev:match(";%s*$") and not prev:match("return")
-                local next_is_not_decl = not next:match("^%t*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*%s*;")
+                local next_is_not_decl = not next:match("^%t*[%a_][%a%d_%*]*[%s%t]+[%a_][%a%d_]*%s*;")
                 if not (prev_is_decl and next_is_not_decl) then skip = true end
                 if prev:match("^{") or next:match("^}") then skip = true end
             end
-            
             if is_empty and #result > 0 and result[#result] == "" then skip = true end
-
             if not skip then table.insert(result, line) end
         end
     end
-
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, result)
 end
 
