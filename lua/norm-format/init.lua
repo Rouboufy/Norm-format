@@ -29,16 +29,13 @@ local function split_initializations()
     ]]
     
     local ok, parser = pcall(vim.treesitter.get_parser, bufnr, "c")
-    if not ok or not parser then 
-        return "No Tree-sitter parser found for C"
-    end
+    if not ok or not parser then return end
     
     local tree = parser:parse()[1]
     local root = tree:root()
     local query = vim.treesitter.query.parse("c", query_string)
     
     local changes = {}
-    local count = 0
     for _, match, _ in query:iter_matches(root, bufnr, 0, -1) do
         local decl_node, type_node, name_node, value_node = nil, nil, nil, nil
         
@@ -52,7 +49,6 @@ local function split_initializations()
         
         if decl_node and type_node and name_node and value_node then
             local parent = decl_node:parent()
-            -- Only split inside functions (compound_statement)
             local is_inside_func = false
             local check = parent
             while check do
@@ -69,8 +65,6 @@ local function split_initializations()
                 local value_text = vim.treesitter.get_node_text(value_node, bufnr)
                 
                 local start_row, start_col, end_row, end_col = decl_node:range()
-                
-                -- Detect current line indentation
                 local line_content = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
                 local indent = line_content:match("^%s*") or ""
                 
@@ -81,37 +75,25 @@ local function split_initializations()
                     end_col = end_col,
                     new_text = { type_text .. " " .. name_text .. ";", indent .. name_text .. " = " .. value_text .. ";" }
                 })
-                count = count + 1
             end
         end
     end
     
-    -- Apply changes in reverse order
     for i = #changes, 1, -1 do
         local c = changes[i]
-        vim.api.nvim_buf_set_text(bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
+        pcall(vim.api.nvim_buf_set_text, bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
     end
-    return nil, count
 end
 
 function M.format()
-    -- Use print for absolute visibility in :messages
-    print("NF_DEBUG: Format start")
-    
-    local split_err, count = split_initializations()
-    if split_err then
-        print("NF_DEBUG: Split error: " .. split_err)
-    elseif count and count > 0 then
-        print("NF_DEBUG: Split count: " .. count)
-    end
+    -- 1. Semantic split
+    pcall(split_initializations)
 
+    -- 2. Clang format
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         vim.cmd("silent! %!clang-format")
         vim.fn.winrestview(view)
-        print("NF_DEBUG: Clang-format done")
-    else
-        print("NF_DEBUG: Clang-format missing")
     end
 end
 
