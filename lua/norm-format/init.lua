@@ -57,21 +57,20 @@ function M.format()
                 end
             end
 
-            -- Type-Name Tabbing (CRITICAL FIX)
-            -- ONLY APPLY to variable declarations and function signatures (starts with type)
-            -- Avoid applying to function calls like printf("%s", str)
-            if not line:match("^#") and not line:match("^{") and not line:match("^}") and not line:match("^%s") then
-                if line:match("^[%a_][%a%d_%*]*%s+[%a_%*]") then
-                    local type, name_part = line:match("^([%a_][%a%d_%*]*.-)%s+([%a_%*].*)")
-                    if type and name_part then
-                        line = type .. "\t" .. name_part
+            -- Type-Name Tabbing (FINAL ATTEMPT: Replace space with Tab for declarations)
+            -- Handles: "int var;" -> "int^Ivar;" and "char *ptr;" -> "char^I*ptr;"
+            if not line:match("^#") and not line:match("^{") and not line:match("^}") then
+                if line:match("^[%t%s]*[%a_][%a%d_%*]+%s+[%a_%*][%a%d_]*%s*;") then
+                    local indent, type, name_rest = line:match("^([%t%s]*)([%a_][%a%d_%*]*.-)%s+([%a_%*][%a%d_]*.*)")
+                    if indent and type and name_rest then
+                        line = indent .. type .. "\t" .. name_rest
                     end
-                end
-            elseif line:match("^%t+[%a_][%a%d_%*]*%s+[%a_%*][%a%d_]*%s*;") then
-                -- Handle local variable declarations (indented)
-                local indent, type, name_part = line:match("^([%t]*)([%a_][%a%d_%*]*.-)%s+([%a_%*].*)")
-                if indent and type and name_part then
-                    line = indent .. type .. "\t" .. name_part
+                elseif line:match("^[%a_][%a%d_%*]+%s+[%a_][%a%d_]*%s*%(") then
+                    -- Functions at top level
+                    local type, name_rest = line:match("^([%a_][%a%d_%*]*.-)%s+([%a_][%a%d_]*.*)")
+                    if type and name_rest then
+                        line = type .. "\t" .. name_rest
+                    end
                 end
             end
             
