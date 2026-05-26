@@ -63,12 +63,13 @@ local function split_initializations()
                     local _, start_col, end_row, end_col = decl_node:range()
                     local line_content = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
                     local indent = line_content:match("^%s*") or ""
+                    
+                    -- Use TAB for splitting type and name
                     table.insert(changes, {
                         start_row = start_row,
                         start_col = start_col,
                         end_row = end_row,
                         end_col = end_col,
-                        -- Use Tabs between type and name
                         new_text = { type_text .. "\t" .. name_text .. ";", "", indent .. name_text .. " = " .. value_text .. ";" }
                     })
                 end
@@ -84,13 +85,12 @@ end
 function M.format()
     local bufnr = vim.api.nvim_get_current_buf()
     
-    -- Save header content to restore it later
+    -- Save exact header state
     local header_lines = vim.api.nvim_buf_get_lines(bufnr, 0, 12, false)
 
     -- 1. Clang format (Alignment pass)
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
-        -- Use style that doesn't break return types
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
         vim.cmd(cmd)
         vim.fn.winrestview(view)
@@ -107,14 +107,9 @@ function M.format()
     for i, line in ipairs(lines) do
         local line_idx = i - 1
         
-        -- IF IN HEADER: Keep as is
+        -- IF IN HEADER: Force restore original
         if is_in_header(line_idx) then
-            -- Use original header if available (prevents corruption during current run)
-            if header_lines[i] then
-                table.insert(result, header_lines[i])
-            else
-                table.insert(result, line)
-            end
+            table.insert(result, header_lines[i] or line)
         else
             line = line:gsub("%s+$", "") -- Trim trailing
             
@@ -131,15 +126,17 @@ function M.format()
                 end
             end
 
-            -- Fix TABS between Type and Name
+            -- Fix TABS between Type and Name (Advanced replacement)
+            -- Handles lines like "int    var;" or "void  func()"
             if line:match("^[%t%s]*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*[%s;%(]") then
+                 -- Greedily capture indent, then type (non-space sequence), then the spaces, then the name/rest
                  local indent, type, rest = line:match("^([%t%s]*)([%a_][%a%d_%*]*.-)%s+([%a_][%a%d_]*.*)")
                  if indent and type and rest then
                      line = indent .. type .. "\t" .. rest
                  end
             end
             
-            -- Indentation: Force Tabs
+            -- Indentation: Force Tabs (convert any 4-space groups outside strings)
             line = line:gsub("    ", "\t")
             
             if line:match("^{") then in_function = true end
@@ -160,13 +157,6 @@ function M.format()
             if is_empty and #result > 0 and result[#result] == "" then skip = true end
 
             if not skip then table.insert(result, line) end
-        end
-    end
-
-    -- 4. Restore the exact original header to be 100% safe
-    for i = 1, 12 do
-        if header_lines[i] then
-            result[i] = header_lines[i]
         end
     end
 
