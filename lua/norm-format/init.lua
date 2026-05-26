@@ -59,7 +59,8 @@ local function split_initializations()
                     start_col = start_col,
                     end_row = end_row,
                     end_col = end_col,
-                    new_text = { type_text .. " " .. name_text .. ";", "", indent .. name_text .. " = " .. value_text .. ";" }
+                    -- Use Tabs between type and name for Norm compliance
+                    new_text = { type_text .. "\t" .. name_text .. ";", "", indent .. name_text .. " = " .. value_text .. ";" }
                 })
             end
         end
@@ -73,7 +74,7 @@ end
 function M.format()
     local bufnr = vim.api.nvim_get_current_buf()
 
-    -- 1. Clang format
+    -- 1. Clang format (Alignment pass)
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
@@ -84,22 +85,20 @@ function M.format()
     -- 2. Semantic split
     split_initializations()
 
-    -- 3. Final cleanup pass
+    -- 3. Final Norm logic pass
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local result = {}
     local in_function = false
-    local after_declarations = false
     
     for i, line in ipairs(lines) do
-        -- A. Trim trailing spaces
-        line = line:gsub("%s+$", "")
-
-        -- B. Fix NO_ARGS_VOID
+        line = line:gsub("%s+$", "") -- Trim trailing
+        
+        -- Fix NO_ARGS_VOID
         if line:match("%s[%a_][%a%d_]*%(%)") or line:match("^[%a_][%a%d_]*%(%)") then
              line = line:gsub("%(%)", "(void)")
         end
 
-        -- C. Fix RETURN_PARENTHESIS
+        -- Fix RETURN_PARENTHESIS
         if line:match("^%s*return%s+[^%(].*;$") then
             local indent, val = line:match("^(%s*)return%s+(.-);$")
             if val and val ~= "" and not val:match("^%b()$") then
@@ -107,61 +106,41 @@ function M.format()
             end
         end
 
-        -- D. Fix MISSING_TAB_FUNC
-        if line:match("^[%a_][%a%d_%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
-            local type, name = line:match("^([%a_][%a%d_%*]-)%s+([%a_][%a%d_]*%s*%b().*)")
-            if type and name then
-                line = type .. "\t" .. name
-            end
+        -- Fix TABS between Type and Name (Functions & Variables)
+        -- Match: [indent]type name[; or (]
+        if line:match("^[%t%s]*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*[%s;%(]") then
+             local indent, type, rest = line:match("^([%t%s]*)([%a_][%a%d_%*]*.-)%s+([%a_][%a%d_]*.*)")
+             if indent and type and rest then
+                 line = indent .. type .. "\t" .. rest
+             end
         end
         
-        -- E. Indentation: Replace ANY 4-space sequence with Tab
+        -- Indentation: Force Tabs
         line = line:gsub("    ", "\t")
         
-        -- F. Empty line logic
-        if line:match("^{") then in_function = true after_declarations = false end
+        if line:match("^{") then in_function = true end
         if line:match("^}") then in_function = false end
         
         local is_empty = line == ""
         local skip = false
         
-        if in_function then
-            -- Is this a declaration block?
-            local is_decl = line:match("^%t*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*%s*;")
-            if is_decl then
-                after_declarations = false
-            elseif not is_empty and not line:match("^{") then
-                after_declarations = true
-            end
+        if in_function and is_empty then
+            local prev = i > 1 and lines[i-1] or ""
+            local next = i < #lines and lines[i+1] or ""
             
-            -- Remove empty line if it's NOT the one between decls and code
-            if is_empty then
-                local prev = i > 1 and lines[i-1] or ""
-                local next = i < #lines and lines[i+1] or ""
-                
-                -- Check if previous line was a declaration and next is not
-                local prev_is_decl = prev:match(";%s*$") and not prev:match("return")
-                local next_is_not_decl = not next:match("^%t*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*%s*;")
-                
-                if not (prev_is_decl and next_is_not_decl) then
-                    skip = true
-                end
-                
-                -- Always skip empty line at start/end of function
-                if prev:match("^{") or next:match("^}") then
-                    skip = true
-                end
+            -- Keep empty line ONLY if it separates decls from code
+            local prev_is_decl = prev:match(";%s*$") and not prev:match("return")
+            local next_is_not_decl = not next:match("^%t*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*%s*;")
+            
+            if not (prev_is_decl and next_is_not_decl) then
+                skip = true
             end
+            if prev:match("^{") or next:match("^}") then skip = true end
         end
         
-        -- Global: Multiple empty lines
-        if is_empty and i > 1 and result[#result] == "" then
-            skip = true
-        end
+        if is_empty and #result > 0 and result[#result] == "" then skip = true end
 
-        if not skip then
-            table.insert(result, line)
-        end
+        if not skip then table.insert(result, line) end
     end
 
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, result)
