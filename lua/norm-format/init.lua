@@ -8,7 +8,7 @@ function M.setup(opts)
         local group = vim.api.nvim_create_augroup("NormFormat", { clear = true })
         vim.api.nvim_create_autocmd("BufWritePre", {
             group = group,
-            pattern = "*.c,*.h",
+            pattern = { "*.c", "*.h" },
             callback = function()
                 M.format()
             end,
@@ -20,7 +20,7 @@ end
 local function split_initializations()
     local bufnr = vim.api.nvim_get_current_buf()
     
-    -- Generic query to find any declaration with an assignment
+    -- Updated query to be more inclusive
     local query_string = [[
         (declaration
             type: (_) @type
@@ -37,23 +37,19 @@ local function split_initializations()
     
     local changes = {}
     for _, match, _ in query:iter_matches(root, bufnr, 0, -1) do
-        local decl_node = nil
-        local type_node = nil
-        local name_node = nil
-        local value_node = nil
+        local decl_node, type_node, name_node, value_node = nil, nil, nil, nil
         
         for id, nodes in pairs(match) do
             local name = query.captures[id]
-            local node = nodes[1]
-            if name == "decl" then decl_node = node
-            elseif name == "type" then type_node = node
-            elseif name == "name" then name_node = node
-            elseif name == "value" then value_node = node end
+            if name == "decl" then decl_node = nodes[1]
+            elseif name == "type" then type_node = nodes[1]
+            elseif name == "name" then name_node = nodes[1]
+            elseif name == "value" then value_node = nodes[1] end
         end
         
         if decl_node and type_node and name_node and value_node then
-            -- Avoid splitting if it's a global variable or constant
             local parent = decl_node:parent()
+            -- Avoid splitting globals
             if parent and parent:type() ~= "translation_unit" then
                 local type_text = vim.treesitter.get_node_text(type_node, bufnr)
                 local name_text = vim.treesitter.get_node_text(name_node, bufnr)
@@ -72,7 +68,7 @@ local function split_initializations()
         end
     end
     
-    -- Apply changes in reverse to maintain offsets
+    -- Apply changes in reverse
     for i = #changes, 1, -1 do
         local c = changes[i]
         pcall(vim.api.nvim_buf_set_text, bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
@@ -80,10 +76,10 @@ local function split_initializations()
 end
 
 function M.format()
-    -- 1. Apply semantic 42 Norm transforms
-    split_initializations()
+    -- 1. Split declarations
+    pcall(split_initializations)
 
-    -- 2. Apply clang-format
+    -- 2. Run clang-format
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         vim.cmd("silent! %!clang-format")
