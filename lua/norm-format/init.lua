@@ -5,7 +5,9 @@ function M.setup(opts)
     local format_on_save = opts.format_on_save ~= false
 
     if format_on_save then
+        local group = vim.api.nvim_create_augroup("NormFormat", { clear = true })
         vim.api.nvim_create_autocmd("BufWritePre", {
+            group = group,
             pattern = "*.c,*.h",
             callback = function()
                 M.format()
@@ -14,17 +16,84 @@ function M.setup(opts)
     end
 end
 
-function M.format()
-    -- Ensure clang-format is available
-    if vim.fn.executable("clang-format") == 0 then
-        vim.notify("clang-format not found", vim.log.levels.ERROR)
-        return
+-- Helper to split declarations (e.g., int i = 0; -> int i;\ni = 0;)
+-- This is a key requirement of the 42 Norm.
+local function split_initializations()
+    local bufnr = vim.api.nvim_get_current_buf()
+    
+    -- Generic query to find any declaration with an assignment
+    local query_string = [[
+        (declaration
+            type: (_) @type
+            declarator: (init_declarator
+                declarator: (_) @name
+                value: (_) @value)) @decl
+    ]]
+    
+    local parser = vim.treesitter.get_parser(bufnr, "c")
+    if not parser then return end
+    local tree = parser:parse()[1]
+    local root = tree:root()
+    local query = vim.treesitter.query.parse("c", query_string)
+    
+    local changes = {}
+    for _, match, _ in query:iter_matches(root, bufnr, 0, -1) do
+        local decl_node = nil
+        local type_node = nil
+        local name_node = nil
+        local value_node = nil
+        
+        for id, nodes in pairs(match) do
+            local name = query.captures[id]
+            local node = nodes[1]
+            if name == "decl" then decl_node = node
+            elseif name == "type" then type_node = node
+            elseif name == "name" then name_node = node
+            elseif name == "value" then value_node = node end
+        end
+        
+        if decl_node and type_node and name_node and value_node then
+            -- Avoid splitting if it's a constant or inside a loop header (though 42 norm usually forbids that)
+            local parent = decl_node:parent()
+            if parent and parent:type() == "translation_unit" then
+                -- Global variable, usually forbidden in 42 anyway but let's be careful
+            else
+                local type_text = vim.treesitter.get_node_text(type_node, bufnr)
+                local name_text = vim.treesitter.get_node_text(name_node, bufnr)
+                local value_text = vim.treesitter.get_node_text(value_node, bufnr)
+                
+                local start_row, start_col, end_row, end_col = decl_node:range()
+                
+                table.insert(changes, {
+                    start_row = start_row,
+                    start_col = start_col,
+                    end_row = end_row,
+                    end_col = end_col,
+                    new_text = { type_text .. " " .. name_text .. ";", name_text .. " = " .. value_text .. ";" }
+                })
+            end
+        end
     end
+    
+    -- Apply changes in reverse to maintain offsets
+    for i = #changes, 1, -1 do
+        local c = changes[i]
+        -- Use pcall to avoid crashing on overlapping nodes or rapid changes
+        pcall(vim.api.nvim_buf_set_text, bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
+    end
+end
 
-    -- Use the .clang-format file if it exists, otherwise use a default 42-style
-    local view = vim.fn.winsaveview()
-    vim.cmd("%!clang-format")
-    vim.fn.winrestview(view)
+function M.format()
+    -- 1. Apply semantic 42 Norm transforms
+    pcall(split_initializations)
+
+    -- 2. Apply clang-format for spacing, indentation, and alignment
+    -- This relies on a valid .clang-format file being present (usually provided by Nmux42)
+    if vim.fn.executable("clang-format") == 1 then
+        local view = vim.fn.winsaveview()
+        vim.cmd("%!clang-format")
+        vim.fn.winrestview(view)
+    end
 end
 
 return M
