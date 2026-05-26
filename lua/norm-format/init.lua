@@ -16,71 +16,11 @@ local function is_in_header(line_idx)
     return line_idx < 12
 end
 
-local function split_initializations()
-    local bufnr = vim.api.nvim_get_current_buf()
-    local query_string = [[
-        (declaration
-            type: (_) @type
-            declarator: (init_declarator
-                declarator: (_) @name
-                value: (_) @value)) @decl
-    ]]
-    local ok, parser = pcall(vim.treesitter.get_parser, bufnr, "c")
-    if not ok or not parser then return end
-    local tree = parser:parse()[1]
-    local root = tree:root()
-    local query = vim.treesitter.query.parse("c", query_string)
-    local changes = {}
-    for _, match, _ in query:iter_matches(root, bufnr, 0, -1) do
-        local decl_node, type_node, name_node, value_node = nil, nil, nil, nil
-        for id, nodes in pairs(match) do
-            local name = query.captures[id]
-            if name == "decl" then decl_node = nodes[1]
-            elseif name == "type" then type_node = nodes[1]
-            elseif name == "name" then name_node = nodes[1]
-            elseif name == "value" then value_node = nodes[1] end
-        end
-        if decl_node and type_node and name_node and value_node then
-            local start_row, _, _, _ = decl_node:range()
-            if not is_in_header(start_row) then
-                local parent = decl_node:parent()
-                local is_inside_func = false
-                local check = parent
-                while check do
-                    if check:type() == "compound_statement" then
-                        is_inside_func = true
-                        break
-                    end
-                    check = check:parent()
-                end
-                if is_inside_func then
-                    local type_text = vim.treesitter.get_node_text(type_node, bufnr)
-                    local name_text = vim.treesitter.get_node_text(name_node, bufnr)
-                    local value_text = vim.treesitter.get_node_text(value_node, bufnr)
-                    local _, start_col, end_row, end_col = decl_node:range()
-                    local line_content = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
-                    local indent = line_content:match("^%s*") or ""
-                    table.insert(changes, {
-                        start_row = start_row,
-                        start_col = start_col,
-                        end_row = end_row,
-                        end_col = end_col,
-                        new_text = { type_text .. "\t" .. name_text .. ";", "", indent .. name_text .. " = " .. value_text .. ";" }
-                    })
-                end
-            end
-        end
-    end
-    for i = #changes, 1, -1 do
-        local c = changes[i]
-        pcall(vim.api.nvim_buf_set_text, bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
-    end
-end
-
 function M.format()
     local bufnr = vim.api.nvim_get_current_buf()
     local header_lines = vim.api.nvim_buf_get_lines(bufnr, 0, 12, false)
 
+    -- Step 1: External tools (Clang Format)
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
@@ -88,18 +28,29 @@ function M.format()
         vim.fn.winrestview(view)
     end
 
-    split_initializations()
-
+    -- Step 2: Line-by-Line Logic
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local result = {}
     local in_function = false
     
     for i, line in ipairs(lines) do
         local line_idx = i - 1
+        
         if is_in_header(line_idx) then
             table.insert(result, header_lines[i] or line)
         else
-            line = line:gsub("%s+$", "")
+            -- A. Trim and Tab-ify Indentation
+            line = line:gsub("%s+$", "") -- Trailing
+            
+            -- Complex Indentation: Replace all 4-space blocks with TABS
+            -- We do this multiple times to catch deeply nested code
+            local old_line = ""
+            while old_line ~= line do
+                old_line = line
+                line = line:gsub("^(%t*)    ", "%1\t")
+            end
+            
+            -- B. Semantic Fixes
             if line:match("%s[%a_][%a%d_]*%(%)") or line:match("^[%a_][%a%d_]*%(%)") then
                  line = line:gsub("%(%)", "(void)")
             end
@@ -110,34 +61,45 @@ function M.format()
                 end
             end
 
-            -- REFINED VARIABLE TABBING: Catch type followed by name
+            -- C. Type-Name Tabbing (CRITICAL FIX)
+            -- This regex finds: [indent] [type words] [space] [pointer/name]
+            -- And replaces that space with a Tab.
             if not line:match("^#") and not line:match("^{") and not line:match("^}") then
-                if line:match("^[%t%s]*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*") then
-                    local indent, type, name_rest = line:match("^([%t%s]*)([%a_][%a%d_%*]*.-)%s+([%a_][%a%d_]*.*)")
+                if line:match("^%t*[%a_][%a%d_%*]*%s+[%a_%*]") then
+                    local indent, type, name_rest = line:match("^([%t]*)([%a_][%a%d_%*]*.-)%s+([%a_%*].*)")
                     if indent and type and name_rest then
                         line = indent .. type .. "\t" .. name_rest
                     end
                 end
             end
             
-            line = line:gsub("    ", "\t")
+            -- D. Empty Line Logic
             if line:match("^{") then in_function = true end
             if line:match("^}") then in_function = false end
             
-            local is_empty = line == ""
+            local is_empty = line:match("^%s*$")
             local skip = false
+            
             if in_function and is_empty then
-                local prev = i > 1 and lines[i-1] or ""
+                local prev = i > 1 and result[#result] or ""
                 local next = i < #lines and lines[i+1] or ""
-                local prev_is_decl = prev:match(";%s*$") and not prev:match("return")
-                local next_is_not_decl = not next:match("^%t*[%a_][%a%d_%*]*[%s%t]+[%a_][%a%d_]*%s*;")
-                if not (prev_is_decl and next_is_not_decl) then skip = true end
-                if prev:match("^{") or next:match("^}") then skip = true end
+                -- Always skip empty line at start/end of block
+                if prev:match("^{") or next:match("^}") then
+                    skip = true
+                end
             end
-            if is_empty and #result > 0 and result[#result] == "" then skip = true end
-            if not skip then table.insert(result, line) end
+            
+            -- Global: No multiple empty lines
+            if is_empty and #result > 0 and result[#result] == "" then
+                skip = true
+            end
+
+            if not skip then
+                table.insert(result, line)
+            end
         end
     end
+
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, result)
 end
 
