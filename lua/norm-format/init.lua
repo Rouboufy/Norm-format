@@ -75,6 +75,57 @@ local function split_initializations()
     end
 end
 
+-- Fix common semantic norm errors using Tree-sitter
+local function fix_norm_semantics()
+    local bufnr = vim.api.nvim_get_current_buf()
+    local parser = vim.treesitter.get_parser(bufnr, "c")
+    if not parser then return end
+    local tree = parser:parse()[1]
+    local root = tree:root()
+
+    -- 1. NO_ARGS_VOID: Replace () with (void)
+    local void_query = vim.treesitter.query.parse("c", [[
+        (function_definition
+            declarator: (function_declarator
+                parameters: (parameter_list) @params))
+    ]])
+    local void_changes = {}
+    for _, match, _ in void_query:iter_matches(root, bufnr, 0, -1) do
+        local node = match[1]
+        if node:child_count() == 2 then -- Only ( and )
+            local s_r, s_c, e_r, e_c = node:range()
+            table.insert(void_changes, { s_r, s_c, e_r, e_c, { "(void)" } })
+        end
+    end
+
+    -- 2. RETURN_PARENTHESIS: return x; -> return (x);
+    local ret_query = vim.treesitter.query.parse("c", [[
+        (return_statement (_)) @ret
+    ]])
+    local ret_changes = {}
+    for _, match, _ in ret_query:iter_matches(root, bufnr, 0, -1) do
+        local node = match[1]
+        local text = vim.treesitter.get_node_text(node, bufnr)
+        if not text:match("^return%s*%b();$") then
+            local val_text = text:match("^return%s*(.*);$")
+            if val_text and not val_text:match("^%b()$") then
+                local s_r, s_c, e_r, e_c = node:range()
+                table.insert(ret_changes, { s_r, s_c, e_r, e_c, { "return (" .. val_text .. ");" } })
+            end
+        end
+    end
+
+    -- Apply changes in reverse
+    local all_changes = {}
+    for _, c in ipairs(void_changes) do table.insert(all_changes, c) end
+    for _, c in ipairs(ret_changes) do table.insert(all_changes, c) end
+    table.sort(all_changes, function(a, b) return a[1] > b[1] or (a[1] == b[1] and a[2] > b[2]) end)
+
+    for _, c in ipairs(all_changes) do
+        pcall(vim.api.nvim_buf_set_text, bufnr, c[1], c[2], c[3], c[4], c[5])
+    end
+end
+
 -- Fix common spacing/empty line norm errors
 local function fix_norm_spacing()
     local bufnr = vim.api.nvim_get_current_buf()
@@ -97,8 +148,7 @@ local function fix_norm_spacing()
         end
     end
 
-    -- 2. Remove empty lines at the very beginning/end of function bodies
-    -- This is a bit complex for regex, but we can do a simple trim for the whole file first
+    -- 2. Remove empty lines at the very beginning/end of whole file
     while #new_lines > 0 and new_lines[1]:match("^%s*$") do
         table.remove(new_lines, 1)
     end
@@ -113,17 +163,35 @@ function M.format()
     -- 1. Semantic split (declarations)
     pcall(split_initializations)
 
-    -- 2. Fix easy norm spacing (multiple empty lines, etc)
+    -- 2. Semantic fixes (void, return parens)
+    pcall(fix_norm_semantics)
+
+    -- 3. Fix easy norm spacing
     pcall(fix_norm_spacing)
 
-    -- 3. Clang format (Indentation and alignment)
+    -- 4. Clang format (Indentation and alignment)
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
-        -- Force tabs and 4-width even if .clang-format is missing or wrong
-        local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80}'"
+        -- Force tabs and 4-width
+        local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlignAfterOpenBracket: Align, AlwaysBreakAfterReturnType: TopLevelDefinitions}'"
         vim.cmd(cmd)
         vim.fn.winrestview(view)
     end
+    
+    -- 5. Final pass for SPACE_BEFORE_FUNC (42 Norm: TAB between type and function name)
+    -- This is hard to do with clang-format perfectly, so we do a regex pass
+    local bufnr = vim.api.nvim_get_current_buf()
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    for i, line in ipairs(lines) do
+        -- Match: type name(args)
+        if line:match("^[%a%s%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
+            local type, name = line:match("^([%a%s%*]+)%s+([%a_][%a%d_]*%s*%b())")
+            if type and name then
+                lines[i] = type .. "\t" .. name
+            end
+        end
+    end
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
 end
 
 return M
