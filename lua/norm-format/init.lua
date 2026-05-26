@@ -29,13 +29,16 @@ local function split_initializations()
     ]]
     
     local ok, parser = pcall(vim.treesitter.get_parser, bufnr, "c")
-    if not ok or not parser then return end
+    if not ok or not parser then 
+        return "No Tree-sitter parser found for C"
+    end
     
     local tree = parser:parse()[1]
     local root = tree:root()
     local query = vim.treesitter.query.parse("c", query_string)
     
     local changes = {}
+    local count = 0
     for _, match, _ in query:iter_matches(root, bufnr, 0, -1) do
         local decl_node, type_node, name_node, value_node = nil, nil, nil, nil
         
@@ -49,21 +52,27 @@ local function split_initializations()
         
         if decl_node and type_node and name_node and value_node then
             local parent = decl_node:parent()
-            -- Split if inside a block {}
-            while parent and parent:type() ~= "compound_statement" and parent:type() ~= "translation_unit" do
-                parent = parent:parent()
+            -- Only split inside functions (compound_statement)
+            local is_inside_func = false
+            local check = parent
+            while check do
+                if check:type() == "compound_statement" then
+                    is_inside_func = true
+                    break
+                end
+                check = check:parent()
             end
             
-            if parent and parent:type() == "compound_statement" then
+            if is_inside_func then
                 local type_text = vim.treesitter.get_node_text(type_node, bufnr)
                 local name_text = vim.treesitter.get_node_text(name_node, bufnr)
                 local value_text = vim.treesitter.get_node_text(value_node, bufnr)
                 
                 local start_row, start_col, end_row, end_col = decl_node:range()
                 
-                -- Detect current line indentation (important for clang-format to not get confused)
-                local line = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
-                local indent = line:match("^%s*") or ""
+                -- Detect current line indentation
+                local line_content = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
+                local indent = line_content:match("^%s*") or ""
                 
                 table.insert(changes, {
                     start_row = start_row,
@@ -72,6 +81,7 @@ local function split_initializations()
                     end_col = end_col,
                     new_text = { type_text .. " " .. name_text .. ";", indent .. name_text .. " = " .. value_text .. ";" }
                 })
+                count = count + 1
             end
         end
     end
@@ -81,30 +91,30 @@ local function split_initializations()
         local c = changes[i]
         vim.api.nvim_buf_set_text(bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
     end
+    return nil, count
 end
 
 function M.format()
+    local buf_name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
+    vim.notify("Norm-format: Triggered on " .. buf_name, vim.log.levels.INFO)
+
     -- 1. Semantic split
-    local split_status, split_err = pcall(split_initializations)
-    if not split_status then
-        vim.notify("Norm-format split failed: " .. tostring(split_err), vim.log.levels.ERROR)
+    local split_err, count = split_initializations()
+    if split_err then
+        vim.notify("Norm-format split error: " .. split_err, vim.log.levels.ERROR)
+    elseif count and count > 0 then
+        vim.notify("Norm-format: Split " .. count .. " declarations", vim.log.levels.INFO)
     end
 
     -- 2. Clang format
-    if vim.fn.executable("clang-format") == 1 then
+    local clang_cmd = "clang-format"
+    if vim.fn.executable(clang_cmd) == 1 then
         local view = vim.fn.winsaveview()
         vim.cmd("silent! %!clang-format")
         vim.fn.winrestview(view)
+        vim.notify("Norm-format: Ran clang-format", vim.log.levels.INFO)
     else
-        -- If clang-format is not in path, try looking in homebrew or local bin
-        local brew_clang = "/home/linuxbrew/.linuxbrew/bin/clang-format"
-        if vim.fn.executable(brew_clang) == 1 then
-             local view = vim.fn.winsaveview()
-             vim.cmd("silent! %!" .. brew_clang)
-             vim.fn.winrestview(view)
-        else
-            vim.notify("clang-format not found in PATH or Homebrew", vim.log.levels.WARN)
-        end
+        vim.notify("Norm-format: clang-format NOT FOUND in path", vim.log.levels.ERROR)
     end
 end
 
