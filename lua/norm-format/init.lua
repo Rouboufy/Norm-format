@@ -20,7 +20,6 @@ end
 local function split_initializations()
     local bufnr = vim.api.nvim_get_current_buf()
     
-    -- Updated query to be more inclusive
     local query_string = [[
         (declaration
             type: (_) @type
@@ -29,8 +28,9 @@ local function split_initializations()
                 value: (_) @value)) @decl
     ]]
     
-    local parser = vim.treesitter.get_parser(bufnr, "c")
-    if not parser then return end
+    local ok, parser = pcall(vim.treesitter.get_parser, bufnr, "c")
+    if not ok or not parser then return end
+    
     local tree = parser:parse()[1]
     local root = tree:root()
     local query = vim.treesitter.query.parse("c", query_string)
@@ -49,8 +49,12 @@ local function split_initializations()
         
         if decl_node and type_node and name_node and value_node then
             local parent = decl_node:parent()
-            -- Avoid splitting globals
-            if parent and parent:type() ~= "translation_unit" then
+            -- Only split inside functions (compound_statement)
+            while parent and parent:type() ~= "compound_statement" and parent:type() ~= "translation_unit" do
+                parent = parent:parent()
+            end
+            
+            if parent and parent:type() == "compound_statement" then
                 local type_text = vim.treesitter.get_node_text(type_node, bufnr)
                 local name_text = vim.treesitter.get_node_text(name_node, bufnr)
                 local value_text = vim.treesitter.get_node_text(value_node, bufnr)
@@ -68,18 +72,18 @@ local function split_initializations()
         end
     end
     
-    -- Apply changes in reverse
+    -- Apply changes in reverse order
     for i = #changes, 1, -1 do
         local c = changes[i]
-        pcall(vim.api.nvim_buf_set_text, bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
+        vim.api.nvim_buf_set_text(bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
     end
 end
 
 function M.format()
-    -- 1. Split declarations
-    pcall(split_initializations)
+    -- 1. Semantic split
+    split_initializations()
 
-    -- 2. Run clang-format
+    -- 2. Clang format
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         vim.cmd("silent! %!clang-format")
