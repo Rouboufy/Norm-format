@@ -88,15 +88,18 @@ function M.format()
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local result = {}
     local in_function = false
-    local seen_declaration = false
+    local after_declarations = false
     
     for i, line in ipairs(lines) do
-        -- A. Fix NO_ARGS_VOID: int main() -> int main(void)
+        -- A. Trim trailing spaces
+        line = line:gsub("%s+$", "")
+
+        -- B. Fix NO_ARGS_VOID
         if line:match("%s[%a_][%a%d_]*%(%)") or line:match("^[%a_][%a%d_]*%(%)") then
              line = line:gsub("%(%)", "(void)")
         end
 
-        -- B. Fix RETURN_PARENTHESIS
+        -- C. Fix RETURN_PARENTHESIS
         if line:match("^%s*return%s+[^%(].*;$") then
             local indent, val = line:match("^(%s*)return%s+(.-);$")
             if val and val ~= "" and not val:match("^%b()$") then
@@ -104,7 +107,7 @@ function M.format()
             end
         end
 
-        -- C. Fix MISSING_TAB_FUNC
+        -- D. Fix MISSING_TAB_FUNC
         if line:match("^[%a_][%a%d_%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
             local type, name = line:match("^([%a_][%a%d_%*]-)%s+([%a_][%a%d_]*%s*%b().*)")
             if type and name then
@@ -112,58 +115,56 @@ function M.format()
             end
         end
         
-        -- D. Fix Leading Spaces (replace all 4-space indents with Tabs)
-        while line:match("^%t*    ") do
-            line = line:gsub("^(%t*)    ", "%1\t")
-        end
+        -- E. Indentation: Replace ANY 4-space sequence with Tab
+        line = line:gsub("    ", "\t")
         
-        -- E. Detect function context for empty line rules
-        if line:match("^{%s*$") then in_function = true seen_declaration = false end
-        if line:match("^}%s*$") then in_function = false end
+        -- F. Empty line logic
+        if line:match("^{") then in_function = true after_declarations = false end
+        if line:match("^}") then in_function = false end
+        
+        local is_empty = line == ""
+        local skip = false
         
         if in_function then
-            -- Is this a declaration?
-            if line:match("^%t*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*%s*;") then
-                seen_declaration = true
+            -- Is this a declaration block?
+            local is_decl = line:match("^%t*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*%s*;")
+            if is_decl then
+                after_declarations = false
+            elseif not is_empty and not line:match("^{") then
+                after_declarations = true
+            end
+            
+            -- Remove empty line if it's NOT the one between decls and code
+            if is_empty then
+                local prev = i > 1 and lines[i-1] or ""
+                local next = i < #lines and lines[i+1] or ""
+                
+                -- Check if previous line was a declaration and next is not
+                local prev_is_decl = prev:match(";%s*$") and not prev:match("return")
+                local next_is_not_decl = not next:match("^%t*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*%s*;")
+                
+                if not (prev_is_decl and next_is_not_decl) then
+                    skip = true
+                end
+                
+                -- Always skip empty line at start/end of function
+                if prev:match("^{") or next:match("^}") then
+                    skip = true
+                end
             end
         end
-
-        table.insert(result, line)
-    end
-    
-    -- F. Remove illegal empty lines inside functions
-    local final = {}
-    for i = 1, #result do
-        local skip = false
-        local line = result[i]
         
-        -- Multiple empty lines
-        if line == "" and i > 1 and result[i-1] == "" then
+        -- Global: Multiple empty lines
+        if is_empty and i > 1 and result[#result] == "" then
             skip = true
-        end
-        
-        -- Empty line after { or before }
-        if line == "" and i > 1 and result[i-1]:match("^{") then skip = true end
-        if line == "" and i < #result and result[i+1]:match("^}") then skip = true end
-        
-        -- Empty line between instructions (after the first block of declarations)
-        -- We detect this if we are deep in a function and see an empty line
-        -- Actually, the rule is: ONE empty line after all declarations.
-        -- But for simplicity: let's remove ALL empty lines inside functions EXCEPT if the previous line was a declaration.
-        if in_function and line == "" then
-             -- (This is a bit aggressive, maybe just remove it if the previous line was NOT a declaration)
-             local prev = result[i-1]
-             if prev and not prev:match(";%s*$") and not prev:match("^{") then
-                 -- This might be inside a control structure... let's be careful.
-             end
         end
 
         if not skip then
-            table.insert(final, line)
+            table.insert(result, line)
         end
     end
 
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, final)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, result)
 end
 
 return M
