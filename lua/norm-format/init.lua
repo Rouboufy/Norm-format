@@ -2,21 +2,16 @@ local M = {}
 
 function M.setup(opts)
     opts = opts or {}
-    local format_on_save = opts.format_on_save ~= false
-
-    if format_on_save then
-        local group = vim.api.nvim_create_augroup("NormFormat", { clear = true })
-        vim.api.nvim_create_autocmd("BufWritePre", {
-            group = group,
-            pattern = { "*.c", "*.h" },
-            callback = function()
-                M.format()
-            end,
-        })
-    end
+    local group = vim.api.nvim_create_augroup("NormFormat", { clear = true })
+    vim.api.nvim_create_autocmd("BufWritePre", {
+        group = group,
+        pattern = { "*.c", "*.h" },
+        callback = function()
+            M.format()
+        end,
+    })
 end
 
--- Helper to split declarations (e.g., int i = 0; -> int i;\n\ni = 0;)
 local function split_initializations()
     local bufnr = vim.api.nvim_get_current_buf()
     local query_string = [[
@@ -75,7 +70,6 @@ local function split_initializations()
     end
 end
 
--- Fix common semantic norm errors using Tree-sitter
 local function fix_norm_semantics()
     local bufnr = vim.api.nvim_get_current_buf()
     local parser = vim.treesitter.get_parser(bufnr, "c")
@@ -83,7 +77,7 @@ local function fix_norm_semantics()
     local tree = parser:parse()[1]
     local root = tree:root()
 
-    -- 1. NO_ARGS_VOID: Replace () with (void)
+    -- 1. NO_ARGS_VOID
     local void_query = vim.treesitter.query.parse("c", [[
         (function_definition
             declarator: (function_declarator
@@ -92,106 +86,88 @@ local function fix_norm_semantics()
     local void_changes = {}
     for _, match, _ in void_query:iter_matches(root, bufnr, 0, -1) do
         local node = match[1]
-        if node:child_count() == 2 then -- Only ( and )
+        if node:child_count() == 2 then
             local s_r, s_c, e_r, e_c = node:range()
             table.insert(void_changes, { s_r, s_c, e_r, e_c, { "(void)" } })
         end
     end
 
-    -- 2. RETURN_PARENTHESIS: return x; -> return (x);
-    local ret_query = vim.treesitter.query.parse("c", [[
-        (return_statement (_)) @ret
-    ]])
+    -- 2. RETURN_PARENTHESIS
+    local ret_query = vim.treesitter.query.parse("c", [[ (return_statement (_)) @ret ]])
     local ret_changes = {}
     for _, match, _ in ret_query:iter_matches(root, bufnr, 0, -1) do
         local node = match[1]
         local text = vim.treesitter.get_node_text(node, bufnr)
-        if not text:match("^return%s*%b();$") then
-            local val_text = text:match("^return%s*(.*);$")
-            if val_text and not val_text:match("^%b()$") then
+        if text:match("^return%s+[^%(].*;$") then
+            local val = text:match("^return%s+(.*);$")
+            if val and val ~= "" then
                 local s_r, s_c, e_r, e_c = node:range()
-                table.insert(ret_changes, { s_r, s_c, e_r, e_c, { "return (" .. val_text .. ");" } })
+                table.insert(ret_changes, { s_r, s_c, e_r, e_c, { "return (" .. val .. ");" } })
             end
         end
     end
 
-    -- Apply changes in reverse
-    local all_changes = {}
-    for _, c in ipairs(void_changes) do table.insert(all_changes, c) end
-    for _, c in ipairs(ret_changes) do table.insert(all_changes, c) end
-    table.sort(all_changes, function(a, b) return a[1] > b[1] or (a[1] == b[1] and a[2] > b[2]) end)
-
-    for _, c in ipairs(all_changes) do
+    local all = {}
+    for _, c in ipairs(void_changes) do table.insert(all, c) end
+    for _, c in ipairs(ret_changes) do table.insert(all, c) end
+    table.sort(all, function(a, b) return a[1] > b[1] or (a[1] == b[1] and a[2] > b[2]) end)
+    for _, c in ipairs(all) do
         pcall(vim.api.nvim_buf_set_text, bufnr, c[1], c[2], c[3], c[4], c[5])
     end
 end
 
--- Fix common spacing/empty line norm errors
-local function fix_norm_spacing()
-    local bufnr = vim.api.nvim_get_current_buf()
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local new_lines = {}
-    local skip_next_empty = false
-
-    for i, line in ipairs(lines) do
-        local is_empty = line:match("^%s*$")
-        
-        -- 1. Remove multiple consecutive empty lines
-        if is_empty then
-            if not skip_next_empty then
-                table.insert(new_lines, "")
-                skip_next_empty = true
-            end
-        else
-            table.insert(new_lines, line)
-            skip_next_empty = false
-        end
-    end
-
-    -- 2. Remove empty lines at the very beginning/end of whole file
-    while #new_lines > 0 and new_lines[1]:match("^%s*$") do
-        table.remove(new_lines, 1)
-    end
-    while #new_lines > 0 and new_lines[#new_lines]:match("^%s*$") do
-        table.remove(new_lines, #new_lines)
-    end
-
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, new_lines)
-end
-
 function M.format()
-    -- 1. Semantic split (declarations)
-    pcall(split_initializations)
-
-    -- 2. Semantic fixes (void, return parens)
-    pcall(fix_norm_semantics)
-
-    -- 3. Fix easy norm spacing
-    pcall(fix_norm_spacing)
-
-    -- 4. Clang format (Indentation and alignment)
+    -- Step 1: Standardize with clang-format first
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
-        -- Force tabs and 4-width
-        local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlignAfterOpenBracket: Align, AlwaysBreakAfterReturnType: TopLevelDefinitions}'"
+        -- Use style that doesn't break return types
+        local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
         vim.cmd(cmd)
         vim.fn.winrestview(view)
     end
-    
-    -- 5. Final pass for SPACE_BEFORE_FUNC (42 Norm: TAB between type and function name)
-    -- This is hard to do with clang-format perfectly, so we do a regex pass
+
+    -- Step 2: Semantic transformations (must happen after clang-format to not get overwritten)
+    split_initializations()
+    fix_norm_semantics()
+
+    -- Step 3: Specific 42 Spacing (Tab between type and function name)
     local bufnr = vim.api.nvim_get_current_buf()
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local changed = false
     for i, line in ipairs(lines) do
-        -- Match: type name(args)
+        -- Fix MISSING_TAB_FUNC
         if line:match("^[%a%s%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
-            local type, name = line:match("^([%a%s%*]+)%s+([%a_][%a%d_]*%s*%b())")
+            local type, name = line:match("^([%a%s%*]-)%s+([%a_][%a%d_]*%s*%b().*)")
             if type and name then
                 lines[i] = type .. "\t" .. name
+                changed = true
             end
         end
+        -- Fix multiple empty lines
+        if i > 1 and lines[i]:match("^%s*$") and lines[i-1]:match("^%s*$") then
+            -- We'll handle this in a separate pass to avoid index issues
+        end
     end
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    
+    -- Step 4: Spacing cleanup pass
+    local final_lines = {}
+    local last_was_empty = false
+    for _, line in ipairs(lines) do
+        local is_empty = line:match("^%s*$")
+        if not (is_empty and last_was_empty) then
+            table.insert(final_lines, line)
+        end
+        last_was_empty = is_empty
+    end
+    
+    -- Remove empty line at start of function (just after brace)
+    for i = 1, #final_lines - 1 do
+        if final_lines[i]:match("^{%s*$") and final_lines[i+1]:match("^%s*$") then
+            table.remove(final_lines, i+1)
+        end
+    end
+
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, final_lines)
 end
 
 return M
