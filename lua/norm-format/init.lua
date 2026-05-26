@@ -16,7 +16,7 @@ function M.setup(opts)
     end
 end
 
--- Helper to split declarations (e.g., int i = 0; -> int i;\ni = 0;)
+-- Helper to split declarations (e.g., int i = 0; -> int i;\n\ni = 0;)
 local function split_initializations()
     local bufnr = vim.api.nvim_get_current_buf()
     
@@ -49,6 +49,7 @@ local function split_initializations()
         
         if decl_node and type_node and name_node and value_node then
             local parent = decl_node:parent()
+            -- Only split inside functions (compound_statement)
             local is_inside_func = false
             local check = parent
             while check do
@@ -65,6 +66,8 @@ local function split_initializations()
                 local value_text = vim.treesitter.get_node_text(value_node, bufnr)
                 
                 local start_row, start_col, end_row, end_col = decl_node:range()
+                
+                -- Detect current line indentation
                 local line_content = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
                 local indent = line_content:match("^%s*") or ""
                 
@@ -73,12 +76,14 @@ local function split_initializations()
                     start_col = start_col,
                     end_row = end_row,
                     end_col = end_col,
-                    new_text = { type_text .. " " .. name_text .. ";", indent .. name_text .. " = " .. value_text .. ";" }
+                    -- Add an empty line between declaration and assignment for Norm compliance
+                    new_text = { type_text .. " " .. name_text .. ";", "", indent .. name_text .. " = " .. value_text .. ";" }
                 })
             end
         end
     end
     
+    -- Apply changes in reverse order
     for i = #changes, 1, -1 do
         local c = changes[i]
         pcall(vim.api.nvim_buf_set_text, bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
