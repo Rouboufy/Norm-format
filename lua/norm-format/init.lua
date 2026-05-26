@@ -49,7 +49,7 @@ local function split_initializations()
         
         if decl_node and type_node and name_node and value_node then
             local parent = decl_node:parent()
-            -- Only split inside functions (compound_statement)
+            -- Split if inside a block {}
             while parent and parent:type() ~= "compound_statement" and parent:type() ~= "translation_unit" do
                 parent = parent:parent()
             end
@@ -61,12 +61,16 @@ local function split_initializations()
                 
                 local start_row, start_col, end_row, end_col = decl_node:range()
                 
+                -- Detect current line indentation (important for clang-format to not get confused)
+                local line = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
+                local indent = line:match("^%s*") or ""
+                
                 table.insert(changes, {
                     start_row = start_row,
                     start_col = start_col,
                     end_row = end_row,
                     end_col = end_col,
-                    new_text = { type_text .. " " .. name_text .. ";", name_text .. " = " .. value_text .. ";" }
+                    new_text = { type_text .. " " .. name_text .. ";", indent .. name_text .. " = " .. value_text .. ";" }
                 })
             end
         end
@@ -81,13 +85,26 @@ end
 
 function M.format()
     -- 1. Semantic split
-    split_initializations()
+    local split_status, split_err = pcall(split_initializations)
+    if not split_status then
+        vim.notify("Norm-format split failed: " .. tostring(split_err), vim.log.levels.ERROR)
+    end
 
     -- 2. Clang format
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         vim.cmd("silent! %!clang-format")
         vim.fn.winrestview(view)
+    else
+        -- If clang-format is not in path, try looking in homebrew or local bin
+        local brew_clang = "/home/linuxbrew/.linuxbrew/bin/clang-format"
+        if vim.fn.executable(brew_clang) == 1 then
+             local view = vim.fn.winsaveview()
+             vim.cmd("silent! %!" .. brew_clang)
+             vim.fn.winrestview(view)
+        else
+            vim.notify("clang-format not found in PATH or Homebrew", vim.log.levels.WARN)
+        end
     end
 end
 
