@@ -86,7 +86,8 @@ local function fix_norm_semantics()
     local void_changes = {}
     for _, match, _ in void_query:iter_matches(root, bufnr, 0, -1) do
         local node = match[1]
-        if node:child_count() == 2 then
+        local text = vim.treesitter.get_node_text(node, bufnr)
+        if text == "()" then
             local s_r, s_c, e_r, e_c = node:range()
             table.insert(void_changes, { s_r, s_c, e_r, e_c, { "(void)" } })
         end
@@ -99,7 +100,7 @@ local function fix_norm_semantics()
         local node = match[1]
         local text = vim.treesitter.get_node_text(node, bufnr)
         if text:match("^return%s+[^%(].*;$") then
-            local val = text:match("^return%s+(.*);$")
+            local val = text:match("^return%s+(.-);$")
             if val and val ~= "" then
                 local s_r, s_c, e_r, e_c = node:range()
                 table.insert(ret_changes, { s_r, s_c, e_r, e_c, { "return (" .. val .. ");" } })
@@ -117,57 +118,65 @@ local function fix_norm_semantics()
 end
 
 function M.format()
-    -- Step 1: Standardize with clang-format first
+    -- 1. Standardize with clang-format first
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
-        -- Use style that doesn't break return types
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
         vim.cmd(cmd)
         vim.fn.winrestview(view)
     end
 
-    -- Step 2: Semantic transformations (must happen after clang-format to not get overwritten)
+    -- 2. Semantic transformations
     split_initializations()
     fix_norm_semantics()
 
-    -- Step 3: Specific 42 Spacing (Tab between type and function name)
+    -- 3. Specific 42 Spacing & Cleaning
     local bufnr = vim.api.nvim_get_current_buf()
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local changed = false
-    for i, line in ipairs(lines) do
-        -- Fix MISSING_TAB_FUNC
-        if line:match("^[%a%s%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
-            local type, name = line:match("^([%a%s%*]-)%s+([%a_][%a%d_]*%s*%b().*)")
-            if type and name then
-                lines[i] = type .. "\t" .. name
-                changed = true
-            end
-        end
-        -- Fix multiple empty lines
-        if i > 1 and lines[i]:match("^%s*$") and lines[i-1]:match("^%s*$") then
-            -- We'll handle this in a separate pass to avoid index issues
-        end
-    end
     
-    -- Step 4: Spacing cleanup pass
     local final_lines = {}
     local last_was_empty = false
-    for _, line in ipairs(lines) do
-        local is_empty = line:match("^%s*$")
-        if not (is_empty and last_was_empty) then
-            table.insert(final_lines, line)
+    
+    for i, line in ipairs(lines) do
+        -- Fix MISSING_TAB_FUNC (Tab between type and function name)
+        -- Match start of line, some characters (type), space, then name and parens
+        if line:match("^[%a_][%a%d_%s%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
+            local type, name = line:match("^([%a_][%a%d_%s%*]-)%s+([%a_][%a%d_]*%s*%b().*)")
+            if type and name then
+                line = type .. "\t" .. name
+            end
         end
-        last_was_empty = is_empty
+        
+        -- Indentation: Replace 4 leading spaces with Tab (just in case clang-format missed it)
+        while line:match("^%t*    ") do
+            line = line:gsub("^(%t*)    ", "%1\t")
+        end
+
+        local is_empty = line:match("^%s*$")
+        if is_empty then
+            if not last_was_empty then
+                table.insert(final_lines, "")
+            end
+            last_was_empty = true
+        else
+            table.insert(final_lines, line)
+            last_was_empty = false
+        end
     end
     
-    -- Remove empty line at start of function (just after brace)
-    for i = 1, #final_lines - 1 do
-        if final_lines[i]:match("^{%s*$") and final_lines[i+1]:match("^%s*$") then
-            table.remove(final_lines, i+1)
+    -- Final pass: Remove empty line at start of function
+    local result = {}
+    for i = 1, #final_lines do
+        local skip = false
+        if i > 1 and final_lines[i-1]:match("^{%s*$") and final_lines[i] == "" then
+            skip = true
+        end
+        if not skip then
+            table.insert(result, final_lines[i])
         end
     end
 
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, final_lines)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, result)
 end
 
 return M
