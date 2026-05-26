@@ -39,15 +39,14 @@ function M.format()
         if is_in_header(line_idx) then
             table.insert(result, header_lines[i] or line)
         else
-            -- A. Trim and Tab-ify Indentation
-            line = line:gsub("%s+$", "") -- Trailing
+            line = line:gsub("%s+$", "") -- Trim trailing
             
-            -- Force TABS for indentation
+            -- Indentation: Force Tabs
             while line:match("^%t*    ") do
                 line = line:gsub("^(%t*)    ", "%1\t")
             end
             
-            -- B. Semantic Fixes
+            -- Semantic Fixes
             if line:match("%s[%a_][%a%d_]*%(%)") or line:match("^[%a_][%a%d_]*%(%)") then
                  line = line:gsub("%(%)", "(void)")
             end
@@ -58,35 +57,36 @@ function M.format()
                 end
             end
 
-            -- C. Type-Name Tabbing (IMPROVED REGEX)
-            -- This catches "int var;" and replaces the space with a Tab.
-            -- 42 Norm: MUST use Tab between type and name.
-            if not line:match("^#") and not line:match("^{") and not line:match("^}") then
-                -- Match: [indent] [type words] [spaces] [name/ptr]
-                local indent, type, name_part = line:match("^([%t%s]*)([%a_][%a%d_%*]*.-)%s+([%a_%*].*)")
+            -- Type-Name Tabbing (CRITICAL FIX)
+            -- ONLY APPLY to variable declarations and function signatures (starts with type)
+            -- Avoid applying to function calls like printf("%s", str)
+            if not line:match("^#") and not line:match("^{") and not line:match("^}") and not line:match("^%s") then
+                if line:match("^[%a_][%a%d_%*]*%s+[%a_%*]") then
+                    local type, name_part = line:match("^([%a_][%a%d_%*]*.-)%s+([%a_%*].*)")
+                    if type and name_part then
+                        line = type .. "\t" .. name_part
+                    end
+                end
+            elseif line:match("^%t+[%a_][%a%d_%*]*%s+[%a_%*][%a%d_]*%s*;") then
+                -- Handle local variable declarations (indented)
+                local indent, type, name_part = line:match("^([%t]*)([%a_][%a%d_%*]*.-)%s+([%a_%*].*)")
                 if indent and type and name_part then
                     line = indent .. type .. "\t" .. name_part
                 end
             end
             
-            -- D. Empty Line Logic
+            -- Empty Line Logic
             if line:match("^{") then in_function = true end
             if line:match("^}") then in_function = false end
             
             local is_empty = line:match("^%s*$")
             local skip = false
-            
             if in_function and is_empty then
                 local prev = i > 1 and result[#result] or ""
                 local next = i < #lines and lines[i+1] or ""
-                if prev:match("^{") or next:match("^}") then
-                    skip = true
-                end
+                if prev:match("^{") or next:match("^}") then skip = true end
             end
-            
-            if is_empty and #result > 0 and result[#result] == "" then
-                skip = true
-            end
+            if is_empty and #result > 0 and result[#result] == "" then skip = true end
 
             if not skip then
                 table.insert(result, line)
