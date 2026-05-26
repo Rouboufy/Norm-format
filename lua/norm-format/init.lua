@@ -70,55 +70,10 @@ local function split_initializations()
     end
 end
 
-local function fix_norm_semantics()
-    local bufnr = vim.api.nvim_get_current_buf()
-    local parser = vim.treesitter.get_parser(bufnr, "c")
-    if not parser then return end
-    local tree = parser:parse()[1]
-    local root = tree:root()
-
-    -- 1. NO_ARGS_VOID
-    local void_query = vim.treesitter.query.parse("c", [[
-        (function_definition
-            declarator: (function_declarator
-                parameters: (parameter_list) @params))
-    ]])
-    local void_changes = {}
-    for _, match, _ in void_query:iter_matches(root, bufnr, 0, -1) do
-        local node = match[1]
-        local text = vim.treesitter.get_node_text(node, bufnr)
-        if text == "()" then
-            local s_r, s_c, e_r, e_c = node:range()
-            table.insert(void_changes, { s_r, s_c, e_r, e_c, { "(void)" } })
-        end
-    end
-
-    -- 2. RETURN_PARENTHESIS
-    local ret_query = vim.treesitter.query.parse("c", [[ (return_statement (_)) @ret ]])
-    local ret_changes = {}
-    for _, match, _ in ret_query:iter_matches(root, bufnr, 0, -1) do
-        local node = match[1]
-        local text = vim.treesitter.get_node_text(node, bufnr)
-        if text:match("^return%s+[^%(].*;$") then
-            local val = text:match("^return%s+(.-);$")
-            if val and val ~= "" then
-                local s_r, s_c, e_r, e_c = node:range()
-                table.insert(ret_changes, { s_r, s_c, e_r, e_c, { "return (" .. val .. ");" } })
-            end
-        end
-    end
-
-    local all = {}
-    for _, c in ipairs(void_changes) do table.insert(all, c) end
-    for _, c in ipairs(ret_changes) do table.insert(all, c) end
-    table.sort(all, function(a, b) return a[1] > b[1] or (a[1] == b[1] and a[2] > b[2]) end)
-    for _, c in ipairs(all) do
-        pcall(vim.api.nvim_buf_set_text, bufnr, c[1], c[2], c[3], c[4], c[5])
-    end
-end
-
 function M.format()
-    -- 1. Standardize with clang-format first
+    local bufnr = vim.api.nvim_get_current_buf()
+
+    -- 1. Standardize with clang-format
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
@@ -126,57 +81,71 @@ function M.format()
         vim.fn.winrestview(view)
     end
 
-    -- 2. Semantic transformations
+    -- 2. Semantic transformations (split)
     split_initializations()
-    fix_norm_semantics()
 
-    -- 3. Specific 42 Spacing & Cleaning
-    local bufnr = vim.api.nvim_get_current_buf()
+    -- 3. Manual Regex / Line Pass for everything else
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    
-    local final_lines = {}
+    local result = {}
     local last_was_empty = false
     
     for i, line in ipairs(lines) do
-        -- Fix MISSING_TAB_FUNC (Tab between type and function name)
-        -- Match start of line, some characters (type), space, then name and parens
-        if line:match("^[%a_][%a%d_%s%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
-            local type, name = line:match("^([%a_][%a%d_%s%*]-)%s+([%a_][%a%d_]*%s*%b().*)")
+        -- A. Fix NO_ARGS_VOID: int main() -> int main(void)
+        if line:match("^[%a_][%a%d_%*]*%s*%b()") and not line:match(";") and line:match("%(%)") then
+             line = line:gsub("%(%)", "(void)")
+        end
+
+        -- B. Fix RETURN_PARENTHESIS: return x; -> return (x);
+        if line:match("^%s*return%s+[^%(].*;$") then
+            local indent, val = line:match("^(%s*)return%s+(.-);$")
+            if val and val ~= "" and not val:match("^%b()$") then
+                line = indent .. "return (" .. val .. ");"
+            end
+        end
+
+        -- C. Fix MISSING_TAB_FUNC: int ft_strlen -> int\tft_strlen
+        -- (Only for top-level function definitions)
+        if line:match("^[%a_][%a%d_%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
+            local type, name = line:match("^([%a_][%a%d_%*]-)%s+([%a_][%a%d_]*%s*%b().*)")
             if type and name then
                 line = type .. "\t" .. name
             end
         end
-        
-        -- Indentation: Replace 4 leading spaces with Tab (just in case clang-format missed it)
-        while line:match("^%t*    ") do
-            line = line:gsub("^(%t*)    ", "%1\t")
-        end
 
+        -- D. Cleanup multiple empty lines
         local is_empty = line:match("^%s*$")
         if is_empty then
             if not last_was_empty then
-                table.insert(final_lines, "")
+                table.insert(result, "")
             end
             last_was_empty = true
         else
-            table.insert(final_lines, line)
+            -- E. Replace 4 spaces with Tab (just in case)
+            while line:match("^%t*    ") do
+                line = line:gsub("^(%t*)    ", "%1\t")
+            end
+            table.insert(result, line)
             last_was_empty = false
         end
     end
     
-    -- Final pass: Remove empty line at start of function
-    local result = {}
-    for i = 1, #final_lines do
+    -- F. Remove empty lines at start of function bodies
+    local final = {}
+    for i = 1, #result do
         local skip = false
-        if i > 1 and final_lines[i-1]:match("^{%s*$") and final_lines[i] == "" then
+        if i > 1 and result[i-1]:match("^{%s*$") and result[i] == "" then
+            skip = true
+        end
+        -- Remove empty line just before closing brace (EMPTY_LINE_FUNCTION)
+        if i < #result and result[i] == "" and result[i+1]:match("^}%s*$") then
             skip = true
         end
         if not skip then
-            table.insert(result, final_lines[i])
+            table.insert(final, result[i])
         end
     end
 
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, result)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, final)
 end
 
 return M
