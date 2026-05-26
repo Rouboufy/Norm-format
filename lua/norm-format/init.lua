@@ -73,7 +73,7 @@ end
 function M.format()
     local bufnr = vim.api.nvim_get_current_buf()
 
-    -- 1. Standardize with clang-format
+    -- 1. Clang format
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
@@ -81,21 +81,22 @@ function M.format()
         vim.fn.winrestview(view)
     end
 
-    -- 2. Semantic transformations (split)
+    -- 2. Semantic split
     split_initializations()
 
-    -- 3. Manual Regex / Line Pass for everything else
+    -- 3. Final cleanup pass
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local result = {}
-    local last_was_empty = false
+    local in_function = false
+    local seen_declaration = false
     
     for i, line in ipairs(lines) do
         -- A. Fix NO_ARGS_VOID: int main() -> int main(void)
-        if line:match("^[%a_][%a%d_%*]*%s*%b()") and not line:match(";") and line:match("%(%)") then
+        if line:match("%s[%a_][%a%d_]*%(%)") or line:match("^[%a_][%a%d_]*%(%)") then
              line = line:gsub("%(%)", "(void)")
         end
 
-        -- B. Fix RETURN_PARENTHESIS: return x; -> return (x);
+        -- B. Fix RETURN_PARENTHESIS
         if line:match("^%s*return%s+[^%(].*;$") then
             local indent, val = line:match("^(%s*)return%s+(.-);$")
             if val and val ~= "" and not val:match("^%b()$") then
@@ -103,45 +104,62 @@ function M.format()
             end
         end
 
-        -- C. Fix MISSING_TAB_FUNC: int ft_strlen -> int\tft_strlen
-        -- (Only for top-level function definitions)
+        -- C. Fix MISSING_TAB_FUNC
         if line:match("^[%a_][%a%d_%*]+%s+[%a_][%a%d_]*%s*%b()") and not line:match(";") and not line:match("^%s") then
             local type, name = line:match("^([%a_][%a%d_%*]-)%s+([%a_][%a%d_]*%s*%b().*)")
             if type and name then
                 line = type .. "\t" .. name
             end
         end
-
-        -- D. Cleanup multiple empty lines
-        local is_empty = line:match("^%s*$")
-        if is_empty then
-            if not last_was_empty then
-                table.insert(result, "")
-            end
-            last_was_empty = true
-        else
-            -- E. Replace 4 spaces with Tab (just in case)
-            while line:match("^%t*    ") do
-                line = line:gsub("^(%t*)    ", "%1\t")
-            end
-            table.insert(result, line)
-            last_was_empty = false
+        
+        -- D. Fix Leading Spaces (replace all 4-space indents with Tabs)
+        while line:match("^%t*    ") do
+            line = line:gsub("^(%t*)    ", "%1\t")
         end
+        
+        -- E. Detect function context for empty line rules
+        if line:match("^{%s*$") then in_function = true seen_declaration = false end
+        if line:match("^}%s*$") then in_function = false end
+        
+        if in_function then
+            -- Is this a declaration?
+            if line:match("^%t*[%a_][%a%d_%*]*%s+[%a_][%a%d_]*%s*;") then
+                seen_declaration = true
+            end
+        end
+
+        table.insert(result, line)
     end
     
-    -- F. Remove empty lines at start of function bodies
+    -- F. Remove illegal empty lines inside functions
     local final = {}
     for i = 1, #result do
         local skip = false
-        if i > 1 and result[i-1]:match("^{%s*$") and result[i] == "" then
+        local line = result[i]
+        
+        -- Multiple empty lines
+        if line == "" and i > 1 and result[i-1] == "" then
             skip = true
         end
-        -- Remove empty line just before closing brace (EMPTY_LINE_FUNCTION)
-        if i < #result and result[i] == "" and result[i+1]:match("^}%s*$") then
-            skip = true
+        
+        -- Empty line after { or before }
+        if line == "" and i > 1 and result[i-1]:match("^{") then skip = true end
+        if line == "" and i < #result and result[i+1]:match("^}") then skip = true end
+        
+        -- Empty line between instructions (after the first block of declarations)
+        -- We detect this if we are deep in a function and see an empty line
+        -- Actually, the rule is: ONE empty line after all declarations.
+        -- But for simplicity: let's remove ALL empty lines inside functions EXCEPT if the previous line was a declaration.
+        if in_function and line == "" then
+             -- (This is a bit aggressive, maybe just remove it if the previous line was NOT a declaration)
+             local prev = result[i-1]
+             if prev and not prev:match(";%s*$") and not prev:match("^{") then
+                 -- This might be inside a control structure... let's be careful.
+             end
         end
+
         if not skip then
-            table.insert(final, result[i])
+            table.insert(final, line)
         end
     end
 
