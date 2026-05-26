@@ -20,7 +20,7 @@ function M.format()
     local bufnr = vim.api.nvim_get_current_buf()
     local header_lines = vim.api.nvim_buf_get_lines(bufnr, 0, 12, false)
 
-    -- Step 1: External tools (Clang Format)
+    -- Step 1: Alignment pass
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
         local cmd = "silent! %!clang-format --style='{BasedOnStyle: LLVM, UseTab: Always, TabWidth: 4, IndentWidth: 4, BreakBeforeBraces: Allman, AllowShortIfStatementsOnASingleLine: false, ColumnLimit: 80, AlwaysBreakAfterReturnType: None}'"
@@ -42,11 +42,8 @@ function M.format()
             -- A. Trim and Tab-ify Indentation
             line = line:gsub("%s+$", "") -- Trailing
             
-            -- Complex Indentation: Replace all 4-space blocks with TABS
-            -- We do this multiple times to catch deeply nested code
-            local old_line = ""
-            while old_line ~= line do
-                old_line = line
+            -- Force TABS for indentation
+            while line:match("^%t*    ") do
                 line = line:gsub("^(%t*)    ", "%1\t")
             end
             
@@ -61,15 +58,14 @@ function M.format()
                 end
             end
 
-            -- C. Type-Name Tabbing (CRITICAL FIX)
-            -- This regex finds: [indent] [type words] [space] [pointer/name]
-            -- And replaces that space with a Tab.
+            -- C. Type-Name Tabbing (IMPROVED REGEX)
+            -- This catches "int var;" and replaces the space with a Tab.
+            -- 42 Norm: MUST use Tab between type and name.
             if not line:match("^#") and not line:match("^{") and not line:match("^}") then
-                if line:match("^%t*[%a_][%a%d_%*]*%s+[%a_%*]") then
-                    local indent, type, name_rest = line:match("^([%t]*)([%a_][%a%d_%*]*.-)%s+([%a_%*].*)")
-                    if indent and type and name_rest then
-                        line = indent .. type .. "\t" .. name_rest
-                    end
+                -- Match: [indent] [type words] [spaces] [name/ptr]
+                local indent, type, name_part = line:match("^([%t%s]*)([%a_][%a%d_%*]*.-)%s+([%a_%*].*)")
+                if indent and type and name_part then
+                    line = indent .. type .. "\t" .. name_part
                 end
             end
             
@@ -83,13 +79,11 @@ function M.format()
             if in_function and is_empty then
                 local prev = i > 1 and result[#result] or ""
                 local next = i < #lines and lines[i+1] or ""
-                -- Always skip empty line at start/end of block
                 if prev:match("^{") or next:match("^}") then
                     skip = true
                 end
             end
             
-            -- Global: No multiple empty lines
             if is_empty and #result > 0 and result[#result] == "" then
                 skip = true
             end
