@@ -17,7 +17,6 @@ function M.setup(opts)
 end
 
 -- Helper to split declarations (e.g., int i = 0; -> int i;\ni = 0;)
--- This is a key requirement of the 42 Norm.
 local function split_initializations()
     local bufnr = vim.api.nvim_get_current_buf()
     
@@ -53,11 +52,9 @@ local function split_initializations()
         end
         
         if decl_node and type_node and name_node and value_node then
-            -- Avoid splitting if it's a constant or inside a loop header (though 42 norm usually forbids that)
+            -- Avoid splitting if it's a global variable or constant
             local parent = decl_node:parent()
-            if parent and parent:type() == "translation_unit" then
-                -- Global variable, usually forbidden in 42 anyway but let's be careful
-            else
+            if parent and parent:type() ~= "translation_unit" then
                 local type_text = vim.treesitter.get_node_text(type_node, bufnr)
                 local name_text = vim.treesitter.get_node_text(name_node, bufnr)
                 local value_text = vim.treesitter.get_node_text(value_node, bufnr)
@@ -78,20 +75,18 @@ local function split_initializations()
     -- Apply changes in reverse to maintain offsets
     for i = #changes, 1, -1 do
         local c = changes[i]
-        -- Use pcall to avoid crashing on overlapping nodes or rapid changes
         pcall(vim.api.nvim_buf_set_text, bufnr, c.start_row, c.start_col, c.end_row, c.end_col, c.new_text)
     end
 end
 
 function M.format()
     -- 1. Apply semantic 42 Norm transforms
-    pcall(split_initializations)
+    split_initializations()
 
-    -- 2. Apply clang-format for spacing, indentation, and alignment
-    -- This relies on a valid .clang-format file being present (usually provided by Nmux42)
+    -- 2. Apply clang-format
     if vim.fn.executable("clang-format") == 1 then
         local view = vim.fn.winsaveview()
-        vim.cmd("%!clang-format")
+        vim.cmd("silent! %!clang-format")
         vim.fn.winrestview(view)
     end
 end
